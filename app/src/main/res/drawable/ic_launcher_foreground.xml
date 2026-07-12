@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- maze corner fragments -->
+    <path android:strokeColor="#553CE0FF" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M14,20 L44,20 M14,20 L14,44 M94,88 L64,88 M94,88 L94,64 M14,88 L14,72 M14,88 L30,88" />
+
+    <!-- pellet trail -->
+    <path android:fillColor="#CCFFE080"
+        android:pathData="M26,54 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 M38,54 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 M50,54 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+
+    <!-- the muncher: neon wedge arc, mouth open toward the pellets -->
+    <path android:strokeColor="#FFFFD23C" android:strokeWidth="3.4" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M72,40 A17,17 0 1,0 72,68 L58,54 Z" />
+    <path android:pathData="M62,54 m-20,0 a20,20 0 1,0 40,0 a20,20 0 1,0 -40,0">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial" android:centerX="62" android:centerY="54" android:gradientRadius="22">
+                <item android:offset="0.0" android:color="#2EFFD23C" />
+                <item android:offset="1.0" android:color="#00FFD23C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- a fleeing pursuer: magenta dome + skirt outline with eyes -->
+    <path android:strokeColor="#FFFF46E0" android:strokeWidth="2.8" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M18,36 A9,9 0 0,1 36,36 L36,44 L33,41 L30,44 L27,41 L24,44 L21,41 L18,44 Z" />
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M23,34 m-1.8,0 a1.8,1.8 0 1,0 3.6,0 a1.8,1.8 0 1,0 -3.6,0 M31,34 m-1.8,0 a1.8,1.8 0 1,0 3.6,0 a1.8,1.8 0 1,0 -3.6,0" />
+</vector>
