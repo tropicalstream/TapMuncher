@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.Handler
 import android.os.HandlerThread
+import com.tapmuncher.R
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -15,10 +16,9 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Synthesized SFX bank for TapMuncher (no audio binaries ship). The classic
- * kit, remixed: an alternating two-note WAKA per pellet, a SIREN loop whose
- * rate the game raises as the maze empties, a bubbling FRIGHT loop while the
- * pursuers run scared, and jingles for the big moments.
+ * Mostly synthesized SFX bank for TapMuncher. The classic kit is remixed with
+ * an alternating two-note WAKA, a rising SIREN loop, a bubbling FRIGHT loop,
+ * and a licensed 8-bit MP3 jingle at the start of every level.
  */
 class Sfx(private val context: Context) {
 
@@ -54,6 +54,10 @@ class Sfx(private val context: Context) {
 
     private val ids = IntArray(COUNT)
     @Volatile private var loaded = false
+    @Volatile private var readyLoaded = false
+    private var readyPending = false
+    private var readyPendingPitch = 1f
+    private var readyPendingVolume = 1f
     @Volatile var volume = 0.7f
     private var sirenStream = 0
     private var frightStream = 0
@@ -62,6 +66,19 @@ class Sfx(private val context: Context) {
 
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
+
+    init {
+        pool.setOnLoadCompleteListener { _, sampleId, status ->
+            handler?.post {
+                if (sampleId != ids[READY]) return@post
+                readyLoaded = status == 0
+                if (readyLoaded && readyPending) {
+                    readyPending = false
+                    playLoaded(READY, readyPendingPitch, readyPendingVolume)
+                }
+            }
+        }
+    }
 
     fun loadAsync() {
         thread = HandlerThread("muncher-sfx").apply { start() }
@@ -79,7 +96,7 @@ class Sfx(private val context: Context) {
                 })
                 ids[FRUIT] = load(dir, "fru", arpeggio(intArrayOf(659, 880, 1318), 50, 0.7f))
                 ids[EXTRA] = load(dir, "ext", arpeggio(intArrayOf(784, 1046, 1318, 1568, 2093), 65, 0.75f))
-                ids[READY] = load(dir, "rdy", arpeggio(intArrayOf(330, 415, 494, 659), 90, 0.65f))
+                ids[READY] = pool.load(context, R.raw.level_start, 1)
                 ids[CLEARJ] = load(dir, "clr", arpeggio(intArrayOf(523, 659, 784, 1046, 1318), 75, 0.72f))
                 ids[GAMEOVER] = load(dir, "ovr", buf(900) { t ->
                     val f = if (t < 0.4f) 320f - t * 160f else 260f - (t - 0.4f) * 130f
@@ -109,12 +126,22 @@ class Sfx(private val context: Context) {
         if (id < 0 || id >= COUNT) return
         handler?.post {
             if (!loaded) return@post
-            val s = ids[id]
-            if (s == 0) return@post
-            val v = (volume * vol).coerceIn(0f, 1f)
-            if (v <= 0f) return@post
-            pool.play(s, v, v, 1, 0, pitch.coerceIn(0.5f, 2f))
+            if (id == READY && !readyLoaded) {
+                readyPending = true
+                readyPendingPitch = pitch
+                readyPendingVolume = vol
+                return@post
+            }
+            playLoaded(id, pitch, vol)
         }
+    }
+
+    private fun playLoaded(id: Int, pitch: Float, vol: Float) {
+        val s = ids[id]
+        if (s == 0) return
+        val v = (volume * vol).coerceIn(0f, 1f)
+        if (v <= 0f) return
+        pool.play(s, v, v, 1, 0, pitch.coerceIn(0.5f, 2f))
     }
 
     @Volatile private var sirenPending = false

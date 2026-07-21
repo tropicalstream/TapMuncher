@@ -1,0 +1,9 @@
+TapMuncher audio credit
+
+"Game Start" by plasterbrain
+Source: https://freesound.org/people/plasterbrain/sounds/243020/
+MP3 mirror: https://commons.wikimedia.org/wiki/File:243020_plasterbrain_game-start.ogg
+License: Creative Commons Attribution-ShareAlike 4.0 International
+https://creativecommons.org/licenses/by-sa/4.0/
+
+The app bundles Wikimedia Commons' MP3 transcode without modification.

@@ -3,7 +3,7 @@ package com.tapmuncher.engine
 import com.tapmuncher.SettingsStore
 import com.tapmuncher.audio.Sfx
 import kotlin.math.abs
-import kotlin.math.floor
+import kotlin.math.ceil
 import kotlin.random.Random
 
 enum class GameState { TITLE, READY, PLAY, DYING, CLEAR, PAUSED, GAME_OVER }
@@ -36,9 +36,10 @@ val GHOST_HUES = floatArrayOf(0.0f, 0.9f, 0.5f, 0.08f)   // red, pink, cyan, ora
  * fruit, a wrap tunnel — drawn as glowing lines on an open 3D table.
  * Basic options live on the intro screen: difficulty, maze, lives.
  *
- * Hand-authored mazes are SELF-HEALED at load: a flood fill from the spawn
- * turns unreachable pellets into empty space, so an authoring slip can never
- * strand a pellet and soft-lock a level.
+ * Hand-authored mazes are SELF-HEALED at load: unreachable corridors are
+ * sealed and terminal branches are connected back into loops (or pruned when
+ * no safe connection exists), so there are no visible/player-reachable dead
+ * ends and an authoring slip can never strand a pellet or stop the player.
  */
 class Game(private val store: SettingsStore, private val host: GameHost) {
 
@@ -48,11 +49,13 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         val DX = intArrayOf(0, 0, -1, 1)   // 0 up, 1 down, 2 left, 3 right
         val DY = intArrayOf(-1, 1, 0, 0)
         val WAVES = floatArrayOf(7f, 20f, 7f, 20f, 5f, 20f, 5f, 1e9f)
-        val FRIGHT_SECS = floatArrayOf(7f, 5f, 3f)
+        val FRIGHT_SECS = floatArrayOf(14f, 10f, 6f)
         val DIFF_NAMES = arrayOf("EASY", "NORMAL", "HARD")
         val MAZE_NAMES = arrayOf("NEON", "OPEN")
         const val DOOR_X = 12; const val DOOR_Y = 6
-        const val FRUIT_X = 12; const val FRUIT_Y = 9
+        const val FRUIT_X = 15; const val FRUIT_Y = 9
+        private const val MOVE_SUBSTEP = 0.055f
+        private const val LEVEL_READY_SECS = 2.9f
 
         val MAP_A = arrayOf(
             "#########################",
@@ -63,7 +66,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
             "#....#.....#.#.....#....#",
             "#.##.#.#..##-##..#.#.##.#",
             "#....#....#HHH#....#....#",
-            "      #...#####...#      ",
+            "          #####          ",
             "#....#.....#.#.....#....#",
             "#.##.#.##.#.#.#.##.#.##.#",
             "#....#....#.#.#....#....#",
@@ -82,7 +85,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
             "#....#.....#.#.....#....#",
             "#.##.#.#..##-##..#.#.##.#",
             "#....#....#HHH#....#....#",
-            "      #...#####...#      ",
+            "          #####          ",
             "#....#.....#.#.....#....#",
             "#.##...#.#.....#.#...##.#",
             "#....#....#.#.#....#....#",
@@ -150,7 +153,8 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
             pristine[y][x] = c
             if (c == 'P') { pacStartX = x; pacStartY = y; pristine[y][x] = '.' }
         }
-        // SELF-HEAL: flood fill from spawn; strand-proof the pellets.
+        // SELF-HEAL phase 1: flood fill from spawn and seal unreachable
+        // decorative corridors so they do not look like playable dead ends.
         val reach = Array(H) { BooleanArray(W) }
         val stack = ArrayDeque<IntArray>()
         stack.add(intArrayOf(pacStartX, pacStartY))
@@ -168,14 +172,177 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                 stack.add(intArrayOf(nx, ny))
             }
         }
+        for (y in 0 until H) for (x in 0 until W) {
+            if (playerWalkable(pristine[y][x]) && !reach[y][x]) pristine[y][x] = '#'
+        }
+
+        // Phase 2: break up every 2x2 walkable block without disconnecting
+        // the maze. Pellets remain in crisp, single-tile corridors instead
+        // of forming adjacent rows across open rooms.
+        removeWideCorridors()
+
+        // Phase 3: recursively eliminate reachable degree-1 branches. Prefer
+        // carving through a one-tile wall into another corridor, producing a
+        // loop; only seal the tip when there is no safe corridor to join.
+        healDeadEnds()
+
         pelletsTotal = 0
         for (y in 0 until H) for (x in 0 until W) {
-            var c = pristine[y][x]
-            if ((c == '.' || c == 'o') && !reach[y][x]) c = ' '
-            pristine[y][x] = c
+            val c = pristine[y][x]
             if (c == '.' || c == 'o') pelletsTotal++
         }
     }
+
+    private fun playerWalkable(c: Char) = c != '#' && c != 'H' && c != '-'
+
+    private fun playerDegree(x: Int, y: Int): Int {
+        var degree = 0
+        for (d in 0 until 4) {
+            val ny = y + DY[d]
+            if (ny !in 0 until H) continue
+            var nx = x + DX[d]
+            if (nx < 0) nx = W - 1
+            if (nx >= W) nx = 0
+            if (playerWalkable(pristine[ny][nx])) degree++
+        }
+        return degree
+    }
+
+    private fun walkableCount(): Int {
+        var count = 0
+        for (row in pristine) for (c in row) if (playerWalkable(c)) count++
+        return count
+    }
+
+    private fun reachableCount(): Int {
+        if (!playerWalkable(pristine[pacStartY][pacStartX])) return 0
+        val seen = Array(H) { BooleanArray(W) }
+        val stack = ArrayDeque<IntArray>()
+        stack.add(intArrayOf(pacStartX, pacStartY))
+        seen[pacStartY][pacStartX] = true
+        var count = 0
+        while (stack.isNotEmpty()) {
+            val (x, y) = stack.removeLast()
+            count++
+            for (d in 0 until 4) {
+                val ny = y + DY[d]
+                if (ny !in 0 until H) continue
+                var nx = x + DX[d]
+                if (nx < 0) nx = W - 1
+                if (nx >= W) nx = 0
+                if (!seen[ny][nx] && playerWalkable(pristine[ny][nx])) {
+                    seen[ny][nx] = true
+                    stack.add(intArrayOf(nx, ny))
+                }
+            }
+        }
+        return count
+    }
+
+    private fun wideCorridorAt(x: Int, y: Int): Boolean {
+        if (x !in 0 until W - 1 || y !in 0 until H - 1) return false
+        return playerWalkable(pristine[y][x]) &&
+            playerWalkable(pristine[y][x + 1]) &&
+            playerWalkable(pristine[y + 1][x]) &&
+            playerWalkable(pristine[y + 1][x + 1])
+    }
+
+    private fun hasWideCorridorNear(x: Int, y: Int): Boolean {
+        for (top in y - 1..y) for (left in x - 1..x) {
+            if (wideCorridorAt(left, top)) return true
+        }
+        return false
+    }
+
+    private fun removeWideCorridors() {
+        repeat(W * H * 4) {
+            var blockX = -1
+            var blockY = -1
+            find@ for (y in 0 until H - 1) for (x in 0 until W - 1) {
+                if (wideCorridorAt(x, y)) {
+                    blockX = x; blockY = y
+                    break@find
+                }
+            }
+            if (blockX < 0) return
+
+            val candidates = listOf(
+                blockX to blockY,
+                blockX + 1 to blockY + 1,
+                blockX + 1 to blockY,
+                blockX to blockY + 1,
+            ).sortedByDescending { (x, y) -> playerDegree(x, y) }
+
+            var removed = false
+            for ((x, y) in candidates) {
+                val protected = (x == pacStartX && y == pacStartY) ||
+                    (x == FRUIT_X && y == FRUIT_Y) ||
+                    (x == DOOR_X && y == DOOR_Y - 1) || pristine[y][x] == 'o'
+                    || isTunnelCell(x, y)
+                if (protected) continue
+                val old = pristine[y][x]
+                pristine[y][x] = '#'
+                val connected = reachableCount() == walkableCount()
+                val spawnHasExit = playerDegree(pacStartX, pacStartY) >= 2
+                if (connected && spawnHasExit) {
+                    removed = true
+                    break
+                }
+                pristine[y][x] = old
+            }
+            // Both supplied mazes always have a safe choice. Stop rather than
+            // damage connectivity if a future hand-authored maze does not.
+            if (!removed) return
+        }
+    }
+
+    private fun healDeadEnds() {
+        repeat(W * H * 4) {
+            var deadX = -1
+            var deadY = -1
+            find@ for (y in 0 until H) for (x in 0 until W) {
+                if (playerWalkable(pristine[y][x]) && playerDegree(x, y) <= 1) {
+                    deadX = x; deadY = y
+                    break@find
+                }
+            }
+            if (deadX < 0) return
+
+            var carved = false
+            for (d in 0 until 4) {
+                val wallY = deadY + DY[d]
+                val beyondY = wallY + DY[d]
+                if (wallY !in 0 until H || beyondY !in 0 until H) continue
+                var wallX = deadX + DX[d]
+                if (wallX < 0) wallX = W - 1
+                if (wallX >= W) wallX = 0
+                var beyondX = wallX + DX[d]
+                if (beyondX < 0) beyondX = W - 1
+                if (beyondX >= W) beyondX = 0
+                if (pristine[wallY][wallX] == '#' &&
+                    playerWalkable(pristine[beyondY][beyondX])
+                ) {
+                    pristine[wallY][wallX] = '.'
+                    if (!hasWideCorridorNear(wallX, wallY)) {
+                        carved = true
+                        break
+                    }
+                    pristine[wallY][wallX] = '#'
+                }
+            }
+            if (!carved) {
+                // The spawn itself is never deleted. The normalization phase
+                // guarantees it has at least two exits in the supplied maps.
+                if (deadX == pacStartX && deadY == pacStartY) return
+                pristine[deadY][deadX] = '#'
+            }
+        }
+    }
+
+    /** The centre row wraps across the left/right display edges. Keep this
+     * deliberate, pellet-free passage intact while normalizing broad rooms. */
+    private fun isTunnelCell(x: Int, y: Int): Boolean =
+        y == 8 && (x in 0..9 || x in 15 until W)
 
     private fun resetPellets() {
         for (y in 0 until H) for (x in 0 until W) grid[y][x] = pristine[y][x]
@@ -229,7 +396,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         when (state) {
             GameState.TITLE -> if (menuIdx == 0) startGame() else adjustOption(1)
             GameState.PAUSED -> when (pausedIdx) {
-                0 -> { state = GameState.PLAY; host.sfx(Sfx.SELECT); host.sirenStart() }
+                0 -> { state = GameState.PLAY; host.sfx(Sfx.SELECT); resumeChaseAudio() }
                 1 -> { host.sfx(Sfx.SELECT); startGame() }
                 else -> { toTitle(); }
             }
@@ -246,7 +413,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                 host.sirenStop(); host.frightStop()
                 host.sfx(Sfx.BACK)
             }
-            GameState.PAUSED -> { state = GameState.PLAY; host.sirenStart(); host.sfx(Sfx.SELECT) }
+            GameState.PAUSED -> { state = GameState.PLAY; resumeChaseAudio(); host.sfx(Sfx.SELECT) }
             GameState.GAME_OVER -> toTitle()
             else -> {}
         }
@@ -273,7 +440,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         host.sfx(Sfx.READY)
         resetActors()
         state = GameState.READY
-        stateT = 1.8f
+        stateT = LEVEL_READY_SECS
     }
 
     private fun resetActors() {
@@ -316,7 +483,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                     } else {
                         resetActors()
                         state = GameState.READY
-                        stateT = 1.5f
+                        stateT = LEVEL_READY_SECS
                         host.sfx(Sfx.READY, 1f, 0.6f)
                     }
                 }
@@ -328,7 +495,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                     resetPellets()
                     resetActors()
                     state = GameState.READY
-                    stateT = 1.5f
+                    stateT = LEVEL_READY_SECS
                     host.sfx(Sfx.READY)
                 }
             }
@@ -354,20 +521,26 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         if (fruitShown == 0 && pelletsEaten >= 70) { fruitShown = 1; fruitT = 9f; host.sfx(Sfx.FRUIT, 0.8f, 0.7f) }
         if (fruitShown == 1 && pelletsEaten >= 170) { fruitShown = 2; fruitT = 9f; host.sfx(Sfx.FRUIT, 0.8f, 0.7f) }
 
+        val oldPacX = pacX; val oldPacY = pacY
+        val oldGhostX = FloatArray(ghosts.size) { ghosts[it].x }
+        val oldGhostY = FloatArray(ghosts.size) { ghosts[it].y }
         movePac(dt)
+        // Eating the final pellet changes state immediately. Nothing gets a
+        // post-clear collision frame that can steal the earned level clear.
+        if (state != GameState.PLAY) return
         for (g in ghosts) moveGhost(g, dt)
-        collide()
+        collide(oldPacX, oldPacY, oldGhostX, oldGhostY)
     }
 
     private fun diffGhostMul() = when (store.difficulty) { 0 -> 0.85f; 2 -> 1.08f; else -> 1f }
 
-    private fun pacSpeed() = (5.2f + (level - 1) * 0.15f).coerceAtMost(7f)
+    private fun pacSpeed() = (5.2f + (level - 1) * 0.15f).coerceAtMost(7f) * 0.75f
     private fun ghostSpeed(g: Ghost): Float {
         var s = (4.9f + (level - 1) * 0.15f).coerceAtMost(6.8f) * diffGhostMul()
         if (g.eyes) return 9f
         if (frightT > 0f) s *= 0.62f
         if (g.y.toInt() == 8 && (g.x < 3f || g.x > W - 4f)) s *= 0.55f   // tunnel crawl
-        return s
+        return s * 0.75f
     }
 
     /** Can an actor step from tile (x,y) toward dir? */
@@ -384,28 +557,64 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         }
     }
 
-    private fun atCenter(fx: Float, fy: Float): Boolean {
-        val cx = fx - floor(fx + 0.5f)
-        val cy = fy - floor(fy + 0.5f)
-        return abs(cx) < 0.08f && abs(cy) < 0.08f
+    /**
+     * True only while arriving at a tile centre (or when exactly on it).
+     *
+     * A plain "near centre" check also fires just after an actor leaves a
+     * centre. Snapping in that case cancels a small frame/substep and leaves
+     * every actor parked forever. The direction test distinguishes the
+     * arrival side from the departure side while retaining a forgiving turn
+     * window on uneven X3 frame times.
+     */
+    private fun approachingCenter(fx: Float, fy: Float, dir: Int): Boolean {
+        val cx = fx - Math.round(fx)
+        val cy = fy - Math.round(fy)
+        if (abs(cx) >= 0.08f || abs(cy) >= 0.08f) return false
+        return when (dir) {
+            0 -> cy >= 0f // up: approaching from below
+            1 -> cy <= 0f // down: approaching from above
+            2 -> cx >= 0f // left: approaching from the right
+            else -> cx <= 0f // right: approaching from the left
+        }
     }
 
     private fun movePac(dt: Float) {
         val speed = pacSpeed()
-        val tx = Math.round(pacX); val ty = Math.round(pacY)
-        if (atCenter(pacX, pacY)) {
-            if (queuedDir != pacDir && open(tx, ty, queuedDir, null)) {
-                pacDir = queuedDir
-                pacX = tx.toFloat(); pacY = ty.toFloat()
-            }
-            if (!open(tx, ty, pacDir, null)) { pacX = tx.toFloat(); pacY = ty.toFloat(); return }
+        val reverse = opposite(pacDir)
+        // Reversals feel immediate in classic maze games and are especially
+        // important on a tiny temple pad where another swipe costs time.
+        if (queuedDir == reverse && open(Math.round(pacX), Math.round(pacY), queuedDir, null)) {
+            pacDir = queuedDir
         }
-        pacX += DX[pacDir] * speed * dt
-        pacY += DY[pacDir] * speed * dt
-        // tunnel wrap
-        if (pacX < -0.5f) pacX += W; if (pacX >= W - 0.5f) pacX -= W
 
-        // eat what's underfoot
+        // Substep movement so a dropped X3 frame cannot leap completely over
+        // a tile center (losing a queued turn or skipping a pellet).
+        val distance = speed * dt
+        val steps = ceil(distance / MOVE_SUBSTEP).toInt().coerceAtLeast(1)
+        val stepDistance = distance / steps
+        for (step in 0 until steps) {
+            if (state != GameState.PLAY) break
+            val tx = Math.round(pacX); val ty = Math.round(pacY)
+            if (approachingCenter(pacX, pacY, pacDir)) {
+                pacX = tx.toFloat(); pacY = ty.toFloat()
+                if (queuedDir != pacDir && open(tx, ty, queuedDir, null)) {
+                    pacDir = queuedDir
+                }
+                if (!open(tx, ty, pacDir, null)) {
+                    // Movement is automatic, but a wall stops the player
+                    // until a valid turn is swiped (classic maze behavior).
+                    break
+                }
+            }
+            pacX += DX[pacDir] * stepDistance
+            pacY += DY[pacDir] * stepDistance
+            if (pacX < -0.5f) pacX += W
+            if (pacX >= W - 0.5f) pacX -= W
+            eatAtCurrentTile()
+        }
+    }
+
+    private fun eatAtCurrentTile() {
         val ex = Math.round(pacX); val ey = Math.round(pacY)
         if (ex in 0 until W && ey in 0 until H) {
             when (grid[ey][ex]) {
@@ -470,32 +679,39 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         }
 
         val speed = ghostSpeed(g)
-        val tx = Math.round(g.x); val ty = Math.round(g.y)
-        if (atCenter(g.x, g.y)) {
-            val rev = when (g.dir) { 0 -> 1; 1 -> 0; 2 -> 3; else -> 2 }
-            var best = -1
-            if (frightT > 0f && !g.eyes) {
-                // frightened: stumble randomly (never reverse unless dead end)
-                val opts = ArrayList<Int>(3)
-                for (d in 0 until 4) if (d != rev && open(tx, ty, d, g)) opts.add(d)
-                best = if (opts.isEmpty()) rev else opts[rng.nextInt(opts.size)]
-            } else {
-                val (gtX, gtY) = targetOf(g)
-                var bestD = Float.MAX_VALUE
-                for (d in 0 until 4) {
-                    if (d != rev && open(tx, ty, d, g)) {
-                        val nx = tx + DX[d]; val ny = ty + DY[d]
-                        val dd = (nx - gtX) * (nx - gtX) + (ny - gtY) * (ny - gtY)
-                        if (dd < bestD) { bestD = dd; best = d }
+        val distance = speed * dt
+        val steps = ceil(distance / MOVE_SUBSTEP).toInt().coerceAtLeast(1)
+        val stepDistance = distance / steps
+        for (step in 0 until steps) {
+            val tx = Math.round(g.x); val ty = Math.round(g.y)
+            if (approachingCenter(g.x, g.y, g.dir)) {
+                g.x = tx.toFloat(); g.y = ty.toFloat()
+                val rev = opposite(g.dir)
+                var best = -1
+                if (frightT > 0f && !g.eyes) {
+                    // frightened: stumble randomly (never reverse unless dead end)
+                    val opts = ArrayList<Int>(3)
+                    for (d in 0 until 4) if (d != rev && open(tx, ty, d, g)) opts.add(d)
+                    best = if (opts.isEmpty()) rev else opts[rng.nextInt(opts.size)]
+                } else {
+                    val (gtX, gtY) = targetOf(g)
+                    var bestD = Float.MAX_VALUE
+                    for (d in 0 until 4) {
+                        if (d != rev && open(tx, ty, d, g)) {
+                            val nx = tx + DX[d]; val ny = ty + DY[d]
+                            val dd = (nx - gtX) * (nx - gtX) + (ny - gtY) * (ny - gtY)
+                            if (dd < bestD) { bestD = dd; best = d }
+                        }
                     }
+                    if (best < 0) best = if (open(tx, ty, rev, g)) rev else g.dir
                 }
-                if (best < 0) best = if (open(tx, ty, rev, g)) rev else g.dir
+                g.dir = best
             }
-            if (best != g.dir) { g.dir = best; g.x = tx.toFloat(); g.y = ty.toFloat() }
+            g.x += DX[g.dir] * stepDistance
+            g.y += DY[g.dir] * stepDistance
+            if (g.x < -0.5f) g.x += W
+            if (g.x >= W - 0.5f) g.x -= W
         }
-        g.x += DX[g.dir] * speed * dt
-        g.y += DY[g.dir] * speed * dt
-        if (g.x < -0.5f) g.x += W; if (g.x >= W - 0.5f) g.x -= W
     }
 
     /** The four brains, faithful in spirit. Returns a target tile. */
@@ -519,14 +735,29 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
 
     private fun reverseAll() {
         for (g in ghosts) if (!g.inHouse && !g.eyes) {
-            g.dir = when (g.dir) { 0 -> 1; 1 -> 0; 2 -> 3; else -> 2 }
+            g.dir = opposite(g.dir)
         }
     }
 
-    private fun collide() {
-        for (g in ghosts) {
+    private fun opposite(dir: Int) = when (dir) { 0 -> 1; 1 -> 0; 2 -> 3; else -> 2 }
+
+    private fun collide(oldPacX: Float, oldPacY: Float, oldGhostX: FloatArray, oldGhostY: FloatArray) {
+        for ((i, g) in ghosts.withIndex()) {
             if (g.inHouse) continue
-            val dx = g.x - pacX; val dy = g.y - pacY
+            var startX = tunnelDelta(oldGhostX[i] - oldPacX)
+            var endX = tunnelDelta(g.x - pacX)
+            // Keep the end displacement on the same wrapped branch as start.
+            if (endX - startX > W / 2f) endX -= W
+            if (endX - startX < -W / 2f) endX += W
+            val startY = oldGhostY[i] - oldPacY
+            val endY = g.y - pacY
+            val vx = endX - startX
+            val vy = endY - startY
+            val vv = vx * vx + vy * vy
+            val t = if (vv > 0.0001f)
+                (-(startX * vx + startY * vy) / vv).coerceIn(0f, 1f) else 0f
+            val dx = startX + vx * t
+            val dy = startY + vy * t
             if (dx * dx + dy * dy > 0.42f) continue
             if (g.eyes) continue
             if (frightT > 0f) {
@@ -549,6 +780,13 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         }
     }
 
+    private fun tunnelDelta(raw: Float): Float {
+        var d = raw
+        while (d > W / 2f) d -= W
+        while (d < -W / 2f) d += W
+        return d
+    }
+
     private fun levelClear() {
         state = GameState.CLEAR
         stateT = 2.2f
@@ -559,6 +797,17 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
     private fun sirenUpdate() {
         val frac = 1f - pelletsLeft.toFloat() / pelletsTotal.coerceAtLeast(1)
         host.sirenRate(0.8f + frac * 0.7f)
+    }
+
+    private fun resumeChaseAudio() {
+        if (frightT > 0f) {
+            host.sirenStop()
+            host.frightStart()
+        } else {
+            host.frightStop()
+            host.sirenStart()
+            sirenUpdate()
+        }
     }
 
     private fun addScore(n: Int) {
@@ -580,4 +829,5 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
             host.sirenStop(); host.frightStop()
         }
     }
+
 }

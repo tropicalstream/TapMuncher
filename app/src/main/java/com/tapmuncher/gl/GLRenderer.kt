@@ -361,6 +361,7 @@ class GLRenderer(private val game: Game) : GLSurfaceView.Renderer {
                     }
                 }
                 if (game.highScore > 0) text("HI ${game.highScore}", 320f, 205f, 1.5f, 0.6f, 1f, 0.7f)
+                text("AUTO-MOVE - WALLS STOP YOU", 320f, 418f, 1.1f, 0.55f, 0.8f, 1f)
                 text("SWIPE - TAP START - DOUBLE-TAP PAUSE", 320f, 442f, 1.25f, 1f, 1f, 1f, pulse)
             }
             GameState.PAUSED -> {

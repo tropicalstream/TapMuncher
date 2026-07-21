@@ -1,8 +1,9 @@
 package com.tapmuncher
 
 import android.app.Activity
+import android.content.Intent
 import android.opengl.GLSurfaceView
-import android.os.Build
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,8 +11,6 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.view.WindowManager
 import com.tapmuncher.audio.Sfx
 import com.tapmuncher.engine.Game
@@ -39,6 +38,18 @@ class MainActivity : Activity(), GameHost {
     private var pendingTap: Runnable? = null
     private var downX = 0f
     private var downY = 0f
+    private var touchActive = false
+    private var touchMoved = false
+    private var systemHoldTriggered = false
+    private var keyDownAt = 0L
+    private var keyHeld = false
+
+    private val systemHold = Runnable {
+        if (touchActive && !touchMoved) {
+            systemHoldTriggered = true
+            openRayNeoControlCenter()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,10 +100,31 @@ class MainActivity : Activity(), GameHost {
     private fun swipe(dir: Int) = glView.queueEvent { game.swipe(dir) }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val tapKey = event.keyCode == KeyEvent.KEYCODE_BUTTON_A ||
+            event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+            event.keyCode == KeyEvent.KEYCODE_ENTER || event.keyCode == KeyEvent.KEYCODE_SPACE
+        if (tapKey) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.repeatCount == 0) {
+                        keyDownAt = SystemClock.uptimeMillis()
+                        keyHeld = event.isLongPress
+                    } else keyHeld = true
+                    return super.dispatchKeyEvent(event)
+                }
+                KeyEvent.ACTION_UP -> {
+                    val now = SystemClock.uptimeMillis()
+                    val held = keyHeld || event.isCanceled ||
+                        maxOf(event.eventTime - event.downTime, now - keyDownAt) >= SYSTEM_HOLD_MS
+                    keyDownAt = 0L; keyHeld = false
+                    if (held) return super.dispatchKeyEvent(event)
+                    registerTap()
+                    return true
+                }
+            }
+        }
         if (event.action == KeyEvent.ACTION_UP) {
             when (event.keyCode) {
-                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_SPACE -> { registerTap(); return true }
                 KeyEvent.KEYCODE_DPAD_UP -> { swipe(0); return true }
                 KeyEvent.KEYCODE_DPAD_DOWN -> { swipe(1); return true }
                 KeyEvent.KEYCODE_DPAD_LEFT -> { swipe(2); return true }
@@ -107,18 +139,38 @@ class MainActivity : Activity(), GameHost {
         // Ignore the left temple volume pad.
         if (ev.device?.name?.contains("cyttsp6", ignoreCase = true) == true) return true
         when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { downX = ev.x; downY = ev.y }
+            MotionEvent.ACTION_DOWN -> {
+                downX = ev.x; downY = ev.y
+                touchActive = true; touchMoved = false; systemHoldTriggered = false
+                handler.postDelayed(systemHold, SYSTEM_HOLD_DELAY_MS)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val tolerance = max(18f, 0.04f * minOf(
+                    resources.displayMetrics.widthPixels,
+                    resources.displayMetrics.heightPixels
+                ))
+                if (abs(ev.x - downX) > tolerance || abs(ev.y - downY) > tolerance) {
+                    touchMoved = true
+                    handler.removeCallbacks(systemHold)
+                }
+            }
             MotionEvent.ACTION_UP -> {
+                handler.removeCallbacks(systemHold)
+                touchActive = false
+                if (systemHoldTriggered) return true
                 val dx = ev.x - downX
                 val dy = ev.y - downY
                 val dead = max(36f, 0.045f * resources.displayMetrics.widthPixels)
                 if (abs(dx) < dead && abs(dy) < dead) { registerTap(); return true }
                 if (abs(dx) >= abs(dy)) {
-                    // horizontal dx sign inverted vs the physical gesture on this pad
-                    swipe(if (dx < 0) 3 else 2)
+                    swipe(if (dx < 0) 2 else 3)
                 } else {
                     swipe(if (dy < 0) 0 else 1)
                 }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                handler.removeCallbacks(systemHold)
+                touchActive = false
             }
         }
         return true
@@ -141,22 +193,37 @@ class MainActivity : Activity(), GameHost {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
         sfx.release()
         super.onDestroy()
     }
 
     private fun hideSystemBars() {
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false)
-            window.insetsController?.let {
-                it.hide(WindowInsets.Type.systemBars())
-                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+    }
+
+    private fun openRayNeoControlCenter() {
+        val controlCenter = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("mercury://com.ffalconxr.mercury.launcher/openApp/shortcut")
+        ).addCategory(Intent.CATEGORY_DEFAULT)
+        runCatching { startActivity(controlCenter) }
+            .onFailure {
+                val home = Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_HOME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                runCatching { startActivity(home); finishAndRemoveTask() }
             }
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility =
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        }
+    }
+
+    companion object {
+        private const val SYSTEM_HOLD_MS = 450L
+        private const val SYSTEM_HOLD_DELAY_MS = 550L
     }
 }
