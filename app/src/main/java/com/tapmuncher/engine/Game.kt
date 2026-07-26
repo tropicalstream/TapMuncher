@@ -547,6 +547,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
     private fun ghostSpeed(g: Ghost): Float {
         var s = (4.9f + (level - 1) * 0.15f).coerceAtMost(6.8f) * diffGhostMul() * earlyLevelEase()
         if (g.eyes) return 9f
+        if (g.type == 0 && elroy()) s *= 1.06f
         if (frightT > 0f) s *= 0.62f
         if (g.y.toInt() == 8 && (g.x < 3f || g.x > W - 4f)) s *= 0.55f   // tunnel crawl
         return s * 0.75f
@@ -727,7 +728,18 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
     private fun targetOf(g: Ghost): Pair<Float, Float> {
         if (g.eyes) return DOOR_X.toFloat() to (DOOR_Y - 1).toFloat()
         val scatter = waveIdx % 2 == 0
-        if (scatter && g.type != 0) return scatterX[g.type].toFloat() to scatterY[g.type].toFloat()
+        // Shadow scatters like everyone else. It used to be exempt, so it
+        // chased without pause from the first second of a level — scatter
+        // waves are the player's breathing room, and one ghost ignoring them
+        // outright removed a quarter of it for the whole game.
+        //
+        // It earns its relentlessness instead: once the maze is nearly clear
+        // it goes permanently aggressive (the arcade's "Cruise Elroy"), which
+        // turns the last stretch of a level into the tense part rather than
+        // the whole level into one flat grind.
+        if (scatter && !(g.type == 0 && elroy())) {
+            return scatterX[g.type].toFloat() to scatterY[g.type].toFloat()
+        }
         return when (g.type) {
             0 -> pacX to pacY                                     // shadow: right behind you
             1 -> pacX + DX[pacDir] * 4 to pacY + DY[pacDir] * 4   // speedy: ambush ahead
@@ -741,6 +753,10 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
             }
         }
     }
+
+    /** Shadow turns relentless for the run-in: the last fifth of the pellets. */
+    private fun elroy(): Boolean =
+        pelletsTotal > 0 && pelletsLeft <= (pelletsTotal * 0.2f).toInt()
 
     private fun reverseAll() {
         for (g in ghosts) if (!g.inHouse && !g.eyes) {
