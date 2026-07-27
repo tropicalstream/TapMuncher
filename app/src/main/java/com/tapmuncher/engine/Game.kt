@@ -55,6 +55,12 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         const val DOOR_X = 12; const val DOOR_Y = 6
         const val FRUIT_X = 15; const val FRUIT_Y = 9
         private const val MOVE_SUBSTEP = 0.055f
+        /** How long a swiped-but-impossible turn stays live. Roughly a tile of
+         *  travel: long enough to corner early, short enough not to surprise. */
+        private const val QUEUE_HOLD_SECS = 0.55f
+        /** Cornering window either side of a tile centre. The old 0.08 was
+         *  about 20ms of travel — near-frame-perfect on a temple pad. */
+        private const val TURN_TOLERANCE = 0.18f
         private const val LEVEL_READY_SECS = 2.9f
 
         val MAP_A = arrayOf(
@@ -112,6 +118,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
     var pacY = 15f; private set
     var pacDir = 3; private set
     var queuedDir = 3; private set
+    private var queuedAt = -1f            // game-time the turn was swiped
     var mouthT = 0f; private set
     val ghosts = List(4) { Ghost(it) }
 
@@ -373,7 +380,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                     host.sfx(Sfx.UI)
                 } else adjustOption(if (dir == 3) 1 else -1)
             }
-            GameState.PLAY, GameState.READY -> queuedDir = dir
+            GameState.PLAY, GameState.READY -> { queuedDir = dir; queuedAt = time }
             GameState.PAUSED -> if (dir == 0 || dir == 1) {
                 pausedIdx = (pausedIdx + (if (dir == 1) 1 else -1) + 3) % 3
                 host.sfx(Sfx.UI)
@@ -517,7 +524,13 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
             if (frightT <= 0f) { chain = 0; host.frightStop(); host.sirenStart() }
         } else {
             waveT += dt
-            if (waveT >= WAVES[waveIdx]) { waveT = 0f; waveIdx = (waveIdx + 1).coerceAtMost(WAVES.size - 1); reverseAll() }
+            // Scatter spells shrink as levels climb; chase spells do not. The
+            // pack spends proportionally more of a late level actually hunting.
+            val scatterWave = waveIdx % 2 == 0
+            val waveLen = if (scatterWave)
+                WAVES[waveIdx] * (1f - (level - 1) * 0.06f).coerceAtLeast(0.4f)
+            else WAVES[waveIdx]
+            if (waveT >= waveLen) { waveT = 0f; waveIdx = (waveIdx + 1).coerceAtMost(WAVES.size - 1); reverseAll() }
         }
 
         // fruit
@@ -579,7 +592,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
     private fun approachingCenter(fx: Float, fy: Float, dir: Int): Boolean {
         val cx = fx - Math.round(fx)
         val cy = fy - Math.round(fy)
-        if (abs(cx) >= 0.08f || abs(cy) >= 0.08f) return false
+        if (abs(cx) >= TURN_TOLERANCE || abs(cy) >= TURN_TOLERANCE) return false
         return when (dir) {
             0 -> cy >= 0f // up: approaching from below
             1 -> cy <= 0f // down: approaching from above
@@ -590,11 +603,24 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
 
     private fun movePac(dt: Float) {
         val speed = pacSpeed()
+
+        // A turn the maze never let us take must not lurk. queuedDir used to
+        // persist for ever, so a swipe at a wall would fire later at whatever
+        // junction happened to allow it — the player gets yanked down a
+        // corridor they asked about seconds ago and have long forgotten.
+        // Holding it about a tile's travel is enough to corner early without
+        // it becoming a trap.
+        if (queuedAt >= 0f && queuedDir != pacDir && time - queuedAt > QUEUE_HOLD_SECS) {
+            queuedDir = pacDir
+            queuedAt = -1f
+        }
+
         val reverse = opposite(pacDir)
         // Reversals feel immediate in classic maze games and are especially
         // important on a tiny temple pad where another swipe costs time.
         if (queuedDir == reverse && open(Math.round(pacX), Math.round(pacY), queuedDir, null)) {
             pacDir = queuedDir
+            queuedAt = -1f
         }
 
         // Substep movement so a dropped X3 frame cannot leap completely over
@@ -609,6 +635,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                 pacX = tx.toFloat(); pacY = ty.toFloat()
                 if (queuedDir != pacDir && open(tx, ty, queuedDir, null)) {
                     pacDir = queuedDir
+                    queuedAt = -1f
                 }
                 if (!open(tx, ty, pacDir, null)) {
                     // Movement is automatic, but a wall stops the player
@@ -641,7 +668,7 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
                     grid[ey][ex] = ' '
                     pelletsLeft--; pelletsEaten++
                     addScore(50)
-                    frightT = FRIGHT_SECS[store.difficulty] * (if (level > 4) 0.7f else 1f)
+                    frightT = frightSecs()
                     chain = 0
                     reverseAll()
                     host.sfx(Sfx.POWER)
@@ -754,9 +781,33 @@ class Game(private val store: SettingsStore, private val host: GameHost) {
         }
     }
 
-    /** Shadow turns relentless for the run-in: the last fifth of the pellets. */
-    private fun elroy(): Boolean =
-        pelletsTotal > 0 && pelletsLeft <= (pelletsTotal * 0.2f).toInt()
+    /**
+     * How long a power pill keeps the pack edible.
+     *
+     * This used to drop once at level 5 and then sit at 70% for ever, so
+     * level 14 and level 40 played identically — the game simply stopped
+     * getting harder. It now decays steadily and bottoms out at a token
+     * window: late levels still reward the pill with a snatched kill or two,
+     * but never again with a leisurely sweep of all four.
+     */
+    private fun frightSecs(): Float {
+        val base = FRIGHT_SECS[store.difficulty]
+        val decay = (1f - (level - 1) * 0.075f).coerceAtLeast(0.18f)
+        return base * decay
+    }
+
+    /**
+     * Shadow turns relentless for the run-in.
+     *
+     * The trigger creeps earlier as levels climb — a fifth of the maze left at
+     * level 1, up to nearly half by the teens — so the closing pressure keeps
+     * arriving sooner rather than the difficulty curve going flat.
+     */
+    private fun elroy(): Boolean {
+        if (pelletsTotal <= 0) return false
+        val frac = (0.2f + (level - 1) * 0.018f).coerceAtMost(0.45f)
+        return pelletsLeft <= (pelletsTotal * frac).toInt()
+    }
 
     private fun reverseAll() {
         for (g in ghosts) if (!g.inHouse && !g.eyes) {

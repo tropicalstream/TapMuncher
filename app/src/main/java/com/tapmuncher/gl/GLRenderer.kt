@@ -17,7 +17,6 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.random.Random
 
 /**
  * OpenGL ES 3.0 renderer for TapMuncher: the maze as a glowing neon table —
@@ -45,16 +44,6 @@ class GLRenderer(private val game: Game) : GLSurfaceView.Renderer {
     private val lines = Batch(22000)
     private val fx = Batch(5000)
     private val hud = Batch(5000)
-
-    private val stars: FloatArray = Random(9).let { r ->
-        FloatArray(70 * 3) { i ->
-            when (i % 3) {
-                0 -> r.nextFloat() * 70f - 35f
-                1 -> -4f - r.nextFloat() * 9f
-                else -> r.nextFloat() * 55f - 27f
-            }
-        }
-    }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES30.glClearColor(0f, 0f, 0f, 1f)
@@ -114,7 +103,6 @@ class GLRenderer(private val game: Game) : GLSurfaceView.Renderer {
 
     private fun buildScene() {
         lines.reset(); fx.reset()
-        buildStars()
         when (game.state) {
             GameState.TITLE -> buildTitleParade()
             else -> {
@@ -124,15 +112,6 @@ class GLRenderer(private val game: Game) : GLSurfaceView.Renderer {
                 for (g in game.ghosts) buildGhost(g)
                 buildPac()
             }
-        }
-    }
-
-    private fun buildStars() {
-        val h = game.time * 0.02f
-        for (i in 0 until stars.size / 3) {
-            hsv((h + i * 0.011f) % 1f, 0.35f, 0.8f)
-            val tw = 0.22f + 0.22f * sin(game.time * 1.4f + i)
-            fx.v(stars[i * 3], stars[i * 3 + 1], stars[i * 3 + 2], rgb[0], rgb[1], rgb[2], tw)
         }
     }
 
