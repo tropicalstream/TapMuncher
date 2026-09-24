@@ -6,6 +6,13 @@ scatter/chase waves, fruit, a wrap tunnel — drawn as glowing vector lines on
 an open 3D table (OpenGL ES 3.0, additive lines on black = transparent on the
 waveguide, one draw per eye).
 
+## Screenshots
+
+<p>
+  <img src="images/title.png" width="45%" alt="TapMuncher title screen with ghost lineup">
+  <img src="images/gameplay.png" width="45%" alt="TapMuncher maze mid-game with ghosts and power pills">
+</p>
+
 ## Intro screen — basic options
 
 Swipe up/down to pick a row, left/right (or tap) to change it:
